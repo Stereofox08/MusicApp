@@ -6,6 +6,8 @@ const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
+const fs = require('fs');
+const path = require('path');
 const execFileAsync = promisify(execFile);
 
 const app = express();
@@ -29,22 +31,50 @@ const upload = multer({
 });
 
 // ─────────────────────────────────────────────
-// yt-dlp helpers
+// yt-dlp config
 // ─────────────────────────────────────────────
 
 const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
+const COOKIES_PATH = path.join('/tmp', 'cookies.txt');
 
-/**
- * Поиск через yt-dlp ytsearch
- */
+// Записываем cookies из env в файл при старте
+function setupCookies() {
+  if (process.env.YOUTUBE_COOKIES) {
+    fs.writeFileSync(COOKIES_PATH, process.env.YOUTUBE_COOKIES, 'utf8');
+    console.log('[cookies] Written to', COOKIES_PATH, `(${process.env.YOUTUBE_COOKIES.length} bytes)`);
+    return true;
+  }
+  console.warn('[cookies] YOUTUBE_COOKIES env not set! Streams may fail.');
+  return false;
+}
+
+const hasCookies = setupCookies();
+
+// Базовые аргументы для yt-dlp
+function baseArgs() {
+  const args = ['--no-warnings', '--quiet'];
+  if (hasCookies) {
+    args.push('--cookies', COOKIES_PATH);
+  }
+  return args;
+}
+
+// ─────────────────────────────────────────────
+// yt-dlp helpers
+// ─────────────────────────────────────────────
+
 async function ytSearch(query, limit = 20) {
-  const { stdout } = await execFileAsync(YTDLP, [
+  const args = [
     `ytsearch${limit}:${query}`,
     '--dump-json',
     '--flat-playlist',
-    '--no-warnings',
-    '--quiet',
-  ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+    ...baseArgs(),
+  ];
+
+  const { stdout } = await execFileAsync(YTDLP, args, {
+    timeout: 30000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
 
   const tracks = [];
   for (const line of stdout.trim().split('\n')) {
@@ -66,23 +96,20 @@ async function ytSearch(query, limit = 20) {
         artwork: thumbnail,
         source: 'youtube',
       });
-    } catch (e) { /* skip bad line */ }
+    } catch (e) { /* skip */ }
   }
   return tracks;
 }
 
-/**
- * Получить прямую аудио-ссылку через yt-dlp
- */
 async function ytGetAudioUrl(videoId) {
-  const { stdout } = await execFileAsync(YTDLP, [
+  const args = [
     `https://www.youtube.com/watch?v=${videoId}`,
     '-f', 'bestaudio[ext=m4a]/bestaudio',
     '--get-url',
-    '--no-warnings',
-    '--quiet',
-  ], { timeout: 30000 });
+    ...baseArgs(),
+  ];
 
+  const { stdout } = await execFileAsync(YTDLP, args, { timeout: 30000 });
   const url = stdout.trim().split('\n')[0];
   if (!url || !url.startsWith('http')) {
     throw new Error('Failed to extract audio URL');
@@ -90,40 +117,42 @@ async function ytGetAudioUrl(videoId) {
   return url;
 }
 
-/**
- * Получить метаданные + аудио URL
- */
 async function ytGetStreamInfo(videoId) {
-  const { stdout } = await execFileAsync(YTDLP, [
+  const args = [
     `https://www.youtube.com/watch?v=${videoId}`,
     '-f', 'bestaudio[ext=m4a]/bestaudio',
     '--dump-json',
-    '--no-warnings',
-    '--quiet',
-  ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+    ...baseArgs(),
+  ];
 
+  const { stdout } = await execFileAsync(YTDLP, args, {
+    timeout: 30000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
   return JSON.parse(stdout);
 }
 
-/**
- * Скачать аудио в буфер через yt-dlp (пишет в stdout)
- */
 function ytDownloadBuffer(videoId) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    const proc = spawn(YTDLP, [
+    const args = [
       `https://www.youtube.com/watch?v=${videoId}`,
       '-f', 'bestaudio[ext=m4a]/bestaudio',
-      '-o', '-',          // вывод в stdout
-      '--no-warnings',
-      '--quiet',
-    ], { timeout: 120000 });
+      '-o', '-',
+      ...baseArgs(),
+    ];
+
+    const proc = spawn(YTDLP, args, { timeout: 120000 });
 
     proc.stdout.on('data', chunk => chunks.push(chunk));
-    proc.stderr.on('data', () => {}); // ignore stderr
+
+    let stderrData = '';
+    proc.stderr.on('data', d => { stderrData += d.toString(); });
 
     proc.on('close', code => {
-      if (code !== 0) return reject(new Error(`yt-dlp exited with code ${code}`));
+      if (code !== 0) {
+        return reject(new Error(`yt-dlp exited with code ${code}: ${stderrData.slice(0, 500)}`));
+      }
       resolve(Buffer.concat(chunks));
     });
     proc.on('error', reject);
@@ -131,7 +160,7 @@ function ytDownloadBuffer(videoId) {
 }
 
 // ─────────────────────────────────────────────
-// TRACKS (Supabase CRUD — без изменений)
+// TRACKS
 // ─────────────────────────────────────────────
 
 app.get('/tracks', async (req, res) => {
@@ -181,7 +210,7 @@ app.delete('/tracks/:id', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// SEARCH — через yt-dlp
+// SEARCH
 // ─────────────────────────────────────────────
 
 app.get('/search', async (req, res) => {
@@ -199,8 +228,7 @@ app.get('/search', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// STREAM — проксирование аудио через yt-dlp URL
-// GET /stream?id=VIDEO_ID
+// STREAM
 // ─────────────────────────────────────────────
 
 app.get('/stream', async (req, res) => {
@@ -233,8 +261,7 @@ app.get('/stream', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// DOWNLOAD — скачиваем через yt-dlp, сохраняем в Supabase
-// POST /download  { youtube_id, title, artist }
+// DOWNLOAD
 // ─────────────────────────────────────────────
 
 app.post('/download', async (req, res) => {
@@ -244,7 +271,6 @@ app.post('/download', async (req, res) => {
   try {
     console.log(`[/download] Starting download: ${youtube_id}`);
 
-    // Получаем метаданные
     let meta = {};
     try {
       meta = await ytGetStreamInfo(youtube_id);
@@ -252,7 +278,6 @@ app.post('/download', async (req, res) => {
       console.warn('[/download] Could not get metadata:', e.message);
     }
 
-    // Скачиваем аудио в буфер
     const fileBuffer = await ytDownloadBuffer(youtube_id);
     if (!fileBuffer || fileBuffer.length === 0) {
       throw new Error('Downloaded file is empty');
@@ -305,7 +330,15 @@ app.get('/health', async (req, res) => {
   } catch (e) {
     ytdlpVersion = 'not found: ' + e.message;
   }
-  res.json({ status: 'ok', mode: 'yt-dlp', ytdlpVersion });
+  res.json({
+    status: 'ok',
+    mode: 'yt-dlp',
+    ytdlpVersion,
+    hasCookies,
+  });
 });
 
-app.listen(PORT, () => console.log('MusicApp backend running on port ' + PORT));
+app.listen(PORT, () => {
+  console.log(`MusicApp backend running on port ${PORT}`);
+  console.log(`Cookies: ${hasCookies ? 'YES' : 'NO'}`);
+});
