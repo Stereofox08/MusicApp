@@ -4,9 +4,6 @@ const cors = require('cors');
 const multer = require('multer');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
-const { exec } = require('child_process');
-const util = require('util');
-const execAsync = util.promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -39,24 +36,17 @@ const PIPED_INSTANCES = [
   'https://pipedapi.aeong.one',
 ];
 
-async function getPipedStreams(videoId) {
+async function pipedGet(path) {
   const errors = [];
   for (const instance of PIPED_INSTANCES) {
     try {
-      const res = await fetch(`${instance}/streams/${videoId}`, {
+      const res = await fetch(`${instance}${path}`, {
         headers: { 'User-Agent': 'MusicApp/1.0' },
         timeout: 10000,
       });
-      if (!res.ok) {
-        errors.push(`${instance}: HTTP ${res.status}`);
-        continue;
-      }
+      if (!res.ok) { errors.push(`${instance}: HTTP ${res.status}`); continue; }
       const data = await res.json();
-      if (!data.audioStreams || data.audioStreams.length === 0) {
-        errors.push(`${instance}: no audio streams`);
-        continue;
-      }
-      console.log(`[Piped] Got streams from ${instance} for ${videoId}`);
+      console.log(`[Piped] OK ${instance}${path}`);
       return data;
     } catch (err) {
       errors.push(`${instance}: ${err.message}`);
@@ -66,7 +56,6 @@ async function getPipedStreams(videoId) {
 }
 
 function getBestAudioStream(audioStreams) {
-  // Prefer m4a/mp4, then webm, sort by bitrate desc
   const sorted = [...audioStreams].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
   const m4a = sorted.find(s => s.mimeType && s.mimeType.includes('m4a'));
   const mp4 = sorted.find(s => s.mimeType && s.mimeType.includes('mp4'));
@@ -117,7 +106,7 @@ app.delete('/tracks/:id', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// SEARCH — через youtube-search-python (python3 search.py)
+// SEARCH — через Piped API /search?q=...&filter=music_songs
 // ─────────────────────────────────────────────
 
 app.get('/search', async (req, res) => {
@@ -125,20 +114,39 @@ app.get('/search', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'Query required' });
 
   try {
-    const escaped = q.replace(/"/g, '\\"');
-    const { stdout } = await execAsync(
-      `python3 ${__dirname}/search.py "${escaped}"`,
-      { timeout: 15000 }
-    );
-    const results = JSON.parse(stdout.trim());
-    res.json(results);
+    const encoded = encodeURIComponent(q);
+    const data = await pipedGet(`/search?q=${encoded}&filter=music_songs`);
+
+    if (!data.items || data.items.length === 0) {
+      return res.json([]);
+    }
+
+    const tracks = data.items
+      .filter(item => item.type === 'stream' || item.url)
+      .map(item => {
+        // URL вида /watch?v=VIDEO_ID
+        const youtubeId = (item.url || '').replace('/watch?v=', '');
+        return {
+          id: `yt_${youtubeId}`,
+          youtube_id: youtubeId,
+          title: item.title || 'Unknown',
+          artist: item.uploaderName || item.uploader || 'Unknown',
+          duration: item.duration || 0,
+          artwork: item.thumbnail || null,
+          source: 'youtube',
+        };
+      })
+      .filter(t => t.youtube_id);
+
+    res.json(tracks);
   } catch (err) {
+    console.error('[/search] Error:', err.message);
     res.status(500).json({ error: 'Search failed: ' + err.message });
   }
 });
 
 // ─────────────────────────────────────────────
-// STREAM — через Piped API (без yt-dlp, без 429)
+// STREAM — через Piped API /streams/VIDEO_ID
 // GET /stream?id=VIDEO_ID
 // ─────────────────────────────────────────────
 
@@ -147,13 +155,16 @@ app.get('/stream', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'Video ID required' });
 
   try {
-    const pipedData = await getPipedStreams(id);
+    const pipedData = await pipedGet(`/streams/${id}`);
+    if (!pipedData.audioStreams || pipedData.audioStreams.length === 0) {
+      throw new Error('No audio streams found');
+    }
+
     const stream = getBestAudioStream(pipedData.audioStreams);
     if (!stream || !stream.url) throw new Error('No audio stream URL found');
 
     console.log(`[/stream] Proxying ${id} via ${stream.mimeType} ${stream.bitrate}bps`);
 
-    // Проксируем через бэкенд чтобы обойти CORS на клиенте
     const audioRes = await fetch(stream.url, {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
@@ -180,7 +191,11 @@ app.post('/download', async (req, res) => {
   if (!youtube_id) return res.status(400).json({ error: 'youtube_id required' });
 
   try {
-    const pipedData = await getPipedStreams(youtube_id);
+    const pipedData = await pipedGet(`/streams/${youtube_id}`);
+    if (!pipedData.audioStreams || pipedData.audioStreams.length === 0) {
+      throw new Error('No audio streams found');
+    }
+
     const stream = getBestAudioStream(pipedData.audioStreams);
     if (!stream || !stream.url) throw new Error('No audio stream URL found');
 
