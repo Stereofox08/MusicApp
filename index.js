@@ -4,6 +4,9 @@ const cors = require('cors');
 const multer = require('multer');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
+const { execFile, spawn } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,44 +29,109 @@ const upload = multer({
 });
 
 // ─────────────────────────────────────────────
-// Piped instances — fallback list
+// yt-dlp helpers
 // ─────────────────────────────────────────────
-const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://piped-api.garudalinux.org',
-  'https://api.piped.projectsegfau.lt',
-  'https://pipedapi.coldforge.xyz',
-  'https://pipedapi.aeong.one',
-];
 
-async function pipedGet(path) {
-  const errors = [];
-  for (const instance of PIPED_INSTANCES) {
+const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
+
+/**
+ * Поиск через yt-dlp ytsearch
+ */
+async function ytSearch(query, limit = 20) {
+  const { stdout } = await execFileAsync(YTDLP, [
+    `ytsearch${limit}:${query}`,
+    '--dump-json',
+    '--flat-playlist',
+    '--no-warnings',
+    '--quiet',
+  ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+
+  const tracks = [];
+  for (const line of stdout.trim().split('\n')) {
+    if (!line) continue;
     try {
-      const res = await fetch(`${instance}${path}`, {
-        headers: { 'User-Agent': 'MusicApp/1.0' },
-        timeout: 10000,
+      const item = JSON.parse(line);
+      const duration = item.duration || 0;
+      const thumbs = item.thumbnails || [];
+      const thumbnail = thumbs.length
+        ? thumbs[thumbs.length - 1].url
+        : (item.thumbnail || null);
+
+      tracks.push({
+        id: `yt_${item.id}`,
+        youtube_id: item.id,
+        title: item.title || 'Unknown',
+        artist: item.channel || item.uploader || 'Unknown',
+        duration: Math.floor(duration),
+        artwork: thumbnail,
+        source: 'youtube',
       });
-      if (!res.ok) { errors.push(`${instance}: HTTP ${res.status}`); continue; }
-      const data = await res.json();
-      console.log(`[Piped] OK ${instance}${path}`);
-      return data;
-    } catch (err) {
-      errors.push(`${instance}: ${err.message}`);
-    }
+    } catch (e) { /* skip bad line */ }
   }
-  throw new Error('All Piped instances failed: ' + errors.join(' | '));
+  return tracks;
 }
 
-function getBestAudioStream(audioStreams) {
-  const sorted = [...audioStreams].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-  const m4a = sorted.find(s => s.mimeType && s.mimeType.includes('m4a'));
-  const mp4 = sorted.find(s => s.mimeType && s.mimeType.includes('mp4'));
-  return m4a || mp4 || sorted[0];
+/**
+ * Получить прямую аудио-ссылку через yt-dlp
+ */
+async function ytGetAudioUrl(videoId) {
+  const { stdout } = await execFileAsync(YTDLP, [
+    `https://www.youtube.com/watch?v=${videoId}`,
+    '-f', 'bestaudio[ext=m4a]/bestaudio',
+    '--get-url',
+    '--no-warnings',
+    '--quiet',
+  ], { timeout: 30000 });
+
+  const url = stdout.trim().split('\n')[0];
+  if (!url || !url.startsWith('http')) {
+    throw new Error('Failed to extract audio URL');
+  }
+  return url;
+}
+
+/**
+ * Получить метаданные + аудио URL
+ */
+async function ytGetStreamInfo(videoId) {
+  const { stdout } = await execFileAsync(YTDLP, [
+    `https://www.youtube.com/watch?v=${videoId}`,
+    '-f', 'bestaudio[ext=m4a]/bestaudio',
+    '--dump-json',
+    '--no-warnings',
+    '--quiet',
+  ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+
+  return JSON.parse(stdout);
+}
+
+/**
+ * Скачать аудио в буфер через yt-dlp (пишет в stdout)
+ */
+function ytDownloadBuffer(videoId) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const proc = spawn(YTDLP, [
+      `https://www.youtube.com/watch?v=${videoId}`,
+      '-f', 'bestaudio[ext=m4a]/bestaudio',
+      '-o', '-',          // вывод в stdout
+      '--no-warnings',
+      '--quiet',
+    ], { timeout: 120000 });
+
+    proc.stdout.on('data', chunk => chunks.push(chunk));
+    proc.stderr.on('data', () => {}); // ignore stderr
+
+    proc.on('close', code => {
+      if (code !== 0) return reject(new Error(`yt-dlp exited with code ${code}`));
+      resolve(Buffer.concat(chunks));
+    });
+    proc.on('error', reject);
+  });
 }
 
 // ─────────────────────────────────────────────
-// TRACKS
+// TRACKS (Supabase CRUD — без изменений)
 // ─────────────────────────────────────────────
 
 app.get('/tracks', async (req, res) => {
@@ -87,7 +155,13 @@ app.post('/tracks/upload', upload.single('file'), async (req, res) => {
     const { data: urlData } = supabase.storage.from('tracks').getPublicUrl(fileName);
     const { data: track, error: dbError } = await supabase
       .from('tracks')
-      .insert({ title: title || file.originalname, artist: artist || 'Unknown', file_url: urlData.publicUrl, file_name: fileName, source: 'upload' })
+      .insert({
+        title: title || file.originalname,
+        artist: artist || 'Unknown',
+        file_url: urlData.publicUrl,
+        file_name: fileName,
+        source: 'upload'
+      })
       .select().single();
     if (dbError) return res.status(500).json({ error: dbError.message });
     res.json(track);
@@ -96,7 +170,8 @@ app.post('/tracks/upload', upload.single('file'), async (req, res) => {
 
 app.delete('/tracks/:id', async (req, res) => {
   const { id } = req.params;
-  const { data: track } = await supabase.from('tracks').select('file_name, source').eq('id', id).single();
+  const { data: track } = await supabase
+    .from('tracks').select('file_name, source').eq('id', id).single();
   if (track && ['upload', 'youtube_saved'].includes(track.source) && track.file_name) {
     await supabase.storage.from('tracks').remove([track.file_name]);
   }
@@ -106,7 +181,7 @@ app.delete('/tracks/:id', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// SEARCH — через Piped API /search?q=...&filter=music_songs
+// SEARCH — через yt-dlp
 // ─────────────────────────────────────────────
 
 app.get('/search', async (req, res) => {
@@ -114,30 +189,8 @@ app.get('/search', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'Query required' });
 
   try {
-    const encoded = encodeURIComponent(q);
-    const data = await pipedGet(`/search?q=${encoded}&filter=music_songs`);
-
-    if (!data.items || data.items.length === 0) {
-      return res.json([]);
-    }
-
-    const tracks = data.items
-      .filter(item => item.type === 'stream' || item.url)
-      .map(item => {
-        // URL вида /watch?v=VIDEO_ID
-        const youtubeId = (item.url || '').replace('/watch?v=', '');
-        return {
-          id: `yt_${youtubeId}`,
-          youtube_id: youtubeId,
-          title: item.title || 'Unknown',
-          artist: item.uploaderName || item.uploader || 'Unknown',
-          duration: item.duration || 0,
-          artwork: item.thumbnail || null,
-          source: 'youtube',
-        };
-      })
-      .filter(t => t.youtube_id);
-
+    const tracks = await ytSearch(q, 20);
+    console.log(`[/search] Found ${tracks.length} results for "${q}"`);
     res.json(tracks);
   } catch (err) {
     console.error('[/search] Error:', err.message);
@@ -146,7 +199,7 @@ app.get('/search', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// STREAM — через Piped API /streams/VIDEO_ID
+// STREAM — проксирование аудио через yt-dlp URL
 // GET /stream?id=VIDEO_ID
 // ─────────────────────────────────────────────
 
@@ -155,21 +208,19 @@ app.get('/stream', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'Video ID required' });
 
   try {
-    const pipedData = await pipedGet(`/streams/${id}`);
-    if (!pipedData.audioStreams || pipedData.audioStreams.length === 0) {
-      throw new Error('No audio streams found');
-    }
+    const audioUrl = await ytGetAudioUrl(id);
+    console.log(`[/stream] Proxying ${id}`);
 
-    const stream = getBestAudioStream(pipedData.audioStreams);
-    if (!stream || !stream.url) throw new Error('No audio stream URL found');
-
-    console.log(`[/stream] Proxying ${id} via ${stream.mimeType} ${stream.bitrate}bps`);
-
-    const audioRes = await fetch(stream.url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
+    const audioRes = await fetch(audioUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.youtube.com/',
+      }
     });
 
-    res.setHeader('Content-Type', stream.mimeType || 'audio/mp4');
+    if (!audioRes.ok) throw new Error(`Upstream HTTP ${audioRes.status}`);
+
+    res.setHeader('Content-Type', 'audio/mp4');
     res.setHeader('Access-Control-Allow-Origin', '*');
     if (audioRes.headers.get('content-length')) {
       res.setHeader('Content-Length', audioRes.headers.get('content-length'));
@@ -182,7 +233,7 @@ app.get('/stream', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// DOWNLOAD — скачиваем через Piped, сохраняем в Supabase
+// DOWNLOAD — скачиваем через yt-dlp, сохраняем в Supabase
 // POST /download  { youtube_id, title, artist }
 // ─────────────────────────────────────────────
 
@@ -191,42 +242,46 @@ app.post('/download', async (req, res) => {
   if (!youtube_id) return res.status(400).json({ error: 'youtube_id required' });
 
   try {
-    const pipedData = await pipedGet(`/streams/${youtube_id}`);
-    if (!pipedData.audioStreams || pipedData.audioStreams.length === 0) {
-      throw new Error('No audio streams found');
+    console.log(`[/download] Starting download: ${youtube_id}`);
+
+    // Получаем метаданные
+    let meta = {};
+    try {
+      meta = await ytGetStreamInfo(youtube_id);
+    } catch (e) {
+      console.warn('[/download] Could not get metadata:', e.message);
     }
 
-    const stream = getBestAudioStream(pipedData.audioStreams);
-    if (!stream || !stream.url) throw new Error('No audio stream URL found');
-
-    console.log(`[/download] Downloading ${youtube_id} via Piped`);
-
-    const audioRes = await fetch(stream.url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (!audioRes.ok) throw new Error(`Failed to fetch audio: HTTP ${audioRes.status}`);
-
-    const chunks = [];
-    for await (const chunk of audioRes.body) {
-      chunks.push(chunk);
+    // Скачиваем аудио в буфер
+    const fileBuffer = await ytDownloadBuffer(youtube_id);
+    if (!fileBuffer || fileBuffer.length === 0) {
+      throw new Error('Downloaded file is empty');
     }
-    const fileBuffer = Buffer.concat(chunks);
 
-    const ext = (stream.mimeType || 'audio/mp4').includes('webm') ? 'webm' : 'm4a';
+    console.log(`[/download] Downloaded ${youtube_id}: ${(fileBuffer.length / 1024 / 1024).toFixed(1)} MB`);
+
+    const ext = (meta.ext === 'webm') ? 'webm' : 'm4a';
+    const contentType = ext === 'webm' ? 'audio/webm' : 'audio/mp4';
     const fileName = `yt_${youtube_id}_${Date.now()}.${ext}`;
-    const contentType = stream.mimeType || 'audio/mp4';
 
     const { error: storageError } = await supabase.storage
       .from('tracks').upload(fileName, fileBuffer, { contentType, upsert: false });
     if (storageError) return res.status(500).json({ error: storageError.message });
 
     const { data: urlData } = supabase.storage.from('tracks').getPublicUrl(fileName);
-    const trackTitle = title || pipedData.title || `YouTube: ${youtube_id}`;
-    const trackArtist = artist || pipedData.uploader || 'Unknown';
+    const trackTitle = title || meta.title || `YouTube: ${youtube_id}`;
+    const trackArtist = artist || meta.channel || meta.uploader || 'Unknown';
 
     const { data: track, error: dbError } = await supabase
       .from('tracks')
-      .insert({ title: trackTitle, artist: trackArtist, file_url: urlData.publicUrl, file_name: fileName, source: 'youtube_saved', youtube_id })
+      .insert({
+        title: trackTitle,
+        artist: trackArtist,
+        file_url: urlData.publicUrl,
+        file_name: fileName,
+        source: 'youtube_saved',
+        youtube_id
+      })
       .select().single();
     if (dbError) return res.status(500).json({ error: dbError.message });
 
@@ -238,6 +293,19 @@ app.post('/download', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', mode: 'piped' }));
+// ─────────────────────────────────────────────
+// HEALTH
+// ─────────────────────────────────────────────
+
+app.get('/health', async (req, res) => {
+  let ytdlpVersion = 'unknown';
+  try {
+    const { stdout } = await execFileAsync(YTDLP, ['--version'], { timeout: 5000 });
+    ytdlpVersion = stdout.trim();
+  } catch (e) {
+    ytdlpVersion = 'not found: ' + e.message;
+  }
+  res.json({ status: 'ok', mode: 'yt-dlp', ytdlpVersion });
+});
 
 app.listen(PORT, () => console.log('MusicApp backend running on port ' + PORT));
