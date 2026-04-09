@@ -27,9 +27,7 @@ const upload = multer({
   }
 });
 
-// ─────────────────────────────────────────────
 // TRACKS
-// ─────────────────────────────────────────────
 
 app.get('/tracks', async (req, res) => {
   const { data, error } = await supabase
@@ -70,19 +68,13 @@ app.delete('/tracks/:id', async (req, res) => {
   res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────
-// ПОИСК — через youtube-search-python (NO API KEY!)
-// Установка: pip install youtube-search-python
-// Скрипт search.py вызывается через exec
-// ─────────────────────────────────────────────
+// SEARCH
 
-// GET /search?q=...
 app.get('/search', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'Query required' });
 
   try {
-    // Вызываем питон-скрипт, он выводит JSON в stdout
     const escaped = q.replace(/"/g, '\\"');
     const { stdout } = await execAsync(
       `python3 ${__dirname}/search.py "${escaped}"`,
@@ -95,8 +87,8 @@ app.get('/search', async (req, res) => {
   }
 });
 
-// GET /stream?id=VIDEO_ID — прямая ссылка на аудио через yt-dlp (NO API KEY!)
-// pip install yt-dlp
+// STREAM — FIX: increased timeout, added --no-playlist and skip=dash
+
 app.get('/stream', async (req, res) => {
   const { id } = req.query;
   if (!id) return res.status(400).json({ error: 'Video ID required' });
@@ -108,7 +100,6 @@ app.get('/stream', async (req, res) => {
     const streamUrl = stdout.trim().split('\n')[0];
     if (!streamUrl) throw new Error('Could not get stream URL');
 
-    // Проксируем аудио через бэкенд чтобы обойти CORS
     const fetch = require('node-fetch');
     const audioRes = await fetch(streamUrl);
     res.setHeader('Content-Type', audioRes.headers.get('content-type') || 'audio/mp4');
@@ -117,9 +108,11 @@ app.get('/stream', async (req, res) => {
   } catch (err) {
     console.error('[/stream] Error:', err.message, err.stderr || '');
     res.status(500).json({ error: 'yt-dlp failed: ' + err.message });
-  }  { youtube_id, title, artist }
-// Скачивает mp3 → Supabase Storage → добавляет в библиотеку
-// pip install yt-dlp  +  apt install ffmpeg
+  }
+});
+
+// DOWNLOAD — FIX: increased timeout, added --no-playlist and skip=dash
+
 app.post('/download', async (req, res) => {
   const { youtube_id, title, artist } = req.body;
   if (!youtube_id) return res.status(400).json({ error: 'youtube_id required' });
@@ -146,9 +139,12 @@ app.post('/download', async (req, res) => {
       .select().single();
     if (dbError) return res.status(500).json({ error: dbError.message });
     res.json(track);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[/download] Error:', err.message, err.stderr || '');
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-app.listen(PORT, () => console.log(`🎵 MusicApp backend running on port ${PORT}`));
+app.listen(PORT, () => console.log('MusicApp backend running on port ' + PORT));
