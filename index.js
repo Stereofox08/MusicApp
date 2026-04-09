@@ -104,7 +104,7 @@ async function ytSearch(query, limit = 20) {
 async function ytGetAudioUrl(videoId) {
   const args = [
     `https://www.youtube.com/watch?v=${videoId}`,
-    '-f', 'bestaudio[ext=m4a]/bestaudio',
+    '-f', 'bestaudio',
     '--get-url',
     ...baseArgs(),
   ];
@@ -120,7 +120,7 @@ async function ytGetAudioUrl(videoId) {
 async function ytGetStreamInfo(videoId) {
   const args = [
     `https://www.youtube.com/watch?v=${videoId}`,
-    '-f', 'bestaudio[ext=m4a]/bestaudio',
+    '-f', 'bestaudio',
     '--dump-json',
     ...baseArgs(),
   ];
@@ -137,7 +137,7 @@ function ytDownloadBuffer(videoId) {
     const chunks = [];
     const args = [
       `https://www.youtube.com/watch?v=${videoId}`,
-      '-f', 'bestaudio[ext=m4a]/bestaudio',
+      '-f', 'bestaudio',
       '-o', '-',
       ...baseArgs(),
     ];
