@@ -107,7 +107,13 @@ app.get('/stream', async (req, res) => {
     );
     const streamUrl = stdout.trim().split('\n')[0];
     if (!streamUrl) throw new Error('Could not get stream URL');
-    res.json({ stream_url: streamUrl });
+
+    // Проксируем аудио через бэкенд чтобы обойти CORS
+    const fetch = require('node-fetch');
+    const audioRes = await fetch(streamUrl);
+    res.setHeader('Content-Type', audioRes.headers.get('content-type') || 'audio/mp4');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    audioRes.body.pipe(res);
   } catch (err) {
     res.status(500).json({ error: 'yt-dlp failed: ' + err.message });
   }
