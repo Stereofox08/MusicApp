@@ -85,7 +85,7 @@ app.get('/search', async (req, res) => {
     // Вызываем питон-скрипт, он выводит JSON в stdout
     const escaped = q.replace(/"/g, '\\"');
     const { stdout } = await execAsync(
-      `python3 search.py "${escaped}"`,
+      `python3 ${__dirname}/search.py "${escaped}"`,
       { timeout: 15000 }
     );
     const results = JSON.parse(stdout.trim());
