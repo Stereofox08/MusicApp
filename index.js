@@ -102,7 +102,7 @@ app.get('/stream', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'Video ID required' });
   try {
     const { stdout } = await execAsync(
-      `yt-dlp -f bestaudio --get-url "https://www.youtube.com/watch?v=${id}"`,
+      `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio" --get-url "https://www.youtube.com/watch?v=${id}"`,
       { timeout: 15000 }
     );
     const streamUrl = stdout.trim().split('\n')[0];
