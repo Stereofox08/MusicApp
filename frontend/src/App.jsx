@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from './api.js';
-
+const BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const fmt = (s) => {
   if (!s) return '0:00';
   const m = Math.floor(s / 60);
@@ -305,15 +305,11 @@ export default function App() {
       try { await audio.play(); setIsPlaying(true); } catch { setIsPlaying(false); }
     };
 
-    if (currentTrack.source === 'youtube' && currentTrack.youtube_id) {
-      // YouTube из поиска — получаем прямую ссылку через yt-dlp
-      api.resolveStream(currentTrack.youtube_id)
-        .then(d => play(d.stream_url))
-        .catch(() => setIsPlaying(false));
-    } else {
-      // Загруженный или сохранённый трек — играем напрямую
-      play(currentTrack.file_url);
-    }
+if (currentTrack.source === 'youtube' && currentTrack.youtube_id) {
+  play(`${BASE}/stream?id=${currentTrack.youtube_id}`);
+} else {
+  play(currentTrack.file_url);
+}
 
     audio.onended = () => setIsPlaying(false);
   }, [currentTrack]);
