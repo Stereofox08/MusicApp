@@ -20,7 +20,7 @@ export const api = {
 
   // Прямая ссылка на аудио через yt-dlp
   resolveStream: (youtubeId) =>
-    fetch(`${BASE}/stream?id=${encodeURIComponent(youtubeId)}`).then(r => r.json()),
+  `${BASE}/stream?id=${encodeURIComponent(youtubeId)}`,
 
   // Сохранить трек в библиотеку (скачивает mp3 → Supabase)
   saveTrack: (track) =>
