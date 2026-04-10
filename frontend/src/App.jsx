@@ -309,7 +309,7 @@ export default function App() {
     if (currentTrack.source === 'soundcloud' && currentTrack.stream_url) {
       play(`${BASE}/stream?url=${encodeURIComponent(currentTrack.stream_url)}`);
     } else {
-      play(currentTrack.file_url);
+      play(`${BASE}/proxy?url=${encodeURIComponent(currentTrack.file_url)}`);
     }
 
     audio.onended = () => setIsPlaying(false);
