@@ -52,39 +52,104 @@ const upload = multer({
 });
 
 // ─────────────────────────────────────────────
-// VK Audio API
+// SOUNDCLOUD — автоматическое получение client_id
 // ─────────────────────────────────────────────
 
-const VK_TOKEN = process.env.VK_TOKEN;
-const VK_API = 'https://api.vk.com/method';
-const VK_VERSION = '5.131';
+let SC_CLIENT_ID = process.env.SC_CLIENT_ID || null;
+let SC_CLIENT_ID_FETCHED_AT = 0;
+const SC_CLIENT_ID_TTL = 1000 * 60 * 60 * 6; // обновлять каждые 6 часов
 
-async function vkCall(method, params = {}) {
-  const url = new URL(`${VK_API}/${method}`);
-  url.searchParams.set('access_token', VK_TOKEN);
-  url.searchParams.set('v', VK_VERSION);
-  for (const [k, v] of Object.entries(params)) {
-    url.searchParams.set(k, v);
+async function fetchSCClientId() {
+  try {
+    const homeRes = await fetch('https://soundcloud.com', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120' }
+    });
+    const html = await homeRes.text();
+    const scriptUrls = [...html.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)]
+      .map(m => m[1]);
+    for (const url of scriptUrls.reverse().slice(0, 5)) {
+      const jsRes = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120' }
+      });
+      const js = await jsRes.text();
+      const match = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/);
+      if (match) {
+        console.log('[SC] Got client_id from bundle: ' + match[1].substring(0, 8) + '...');
+        return match[1];
+      }
+    }
+    throw new Error('client_id not found in any bundle');
+  } catch (err) {
+    console.error('[SC] fetchSCClientId error:', err.message);
+    return null;
   }
-  const res = await fetch(url.toString(), {
-    headers: { 'User-Agent': 'VKAndroidApp/7.14-12584 (Android 12; SDK 32; arm64-v8a; samsung SM-G998B; ru)' }
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.error_msg || 'VK API error');
-  return data.response;
 }
 
-function formatTrack(audio) {
+async function getSCClientId() {
+  const now = Date.now();
+  if (SC_CLIENT_ID && (now - SC_CLIENT_ID_FETCHED_AT) < SC_CLIENT_ID_TTL) {
+    return SC_CLIENT_ID;
+  }
+  console.log('[SC] Refreshing client_id...');
+  const id = await fetchSCClientId();
+  if (id) {
+    SC_CLIENT_ID = id;
+    SC_CLIENT_ID_FETCHED_AT = now;
+  }
+  return SC_CLIENT_ID;
+}
+
+async function scFetch(path, params = {}) {
+  const clientId = await getSCClientId();
+  if (!clientId) throw new Error('SoundCloud client_id unavailable');
+  const url = new URL('https://api-v2.soundcloud.com' + path);
+  url.searchParams.set('client_id', clientId);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const res = await fetch(url.toString(), {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120',
+      'Origin': 'https://soundcloud.com',
+      'Referer': 'https://soundcloud.com/',
+    }
+  });
+  if (!res.ok) throw new Error('SoundCloud API ' + res.status + ': ' + await res.text());
+  return res.json();
+}
+
+function formatSCTrack(track) {
+  const transcodings = track.media?.transcodings || [];
+  const progressive = transcodings.find(t => t.format?.protocol === 'progressive');
+  const hls = transcodings.find(t => t.format?.protocol === 'hls');
+  const streamUrl = progressive?.url || hls?.url || null;
+  const artwork = (track.artwork_url || track.user?.avatar_url || null)
+    ?.replace('-large', '-t300x300');
   return {
-    id: `vk_${audio.owner_id}_${audio.id}`,
-    vk_id: `${audio.owner_id}_${audio.id}`,
-    title: audio.title,
-    artist: audio.artist,
-    duration: audio.duration || 0,
-    artwork: audio.album?.thumb?.photo_300 || null,
-    stream_url: audio.url || null,
-    source: 'vk',
+    id: 'sc_' + track.id,
+    sc_id: track.id,
+    title: track.title,
+    artist: track.user?.username || 'Unknown',
+    duration: Math.floor((track.duration || 0) / 1000),
+    artwork,
+    stream_url: streamUrl,
+    source: 'soundcloud',
+    permalink_url: track.permalink_url,
   };
+}
+
+async function resolveSCStreamUrl(transcoding_url) {
+  const clientId = await getSCClientId();
+  const url = new URL(transcoding_url);
+  url.searchParams.set('client_id', clientId);
+  const res = await fetch(url.toString(), {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120',
+      'Origin': 'https://soundcloud.com',
+      'Referer': 'https://soundcloud.com/',
+    }
+  });
+  if (!res.ok) throw new Error('SC stream resolve ' + res.status);
+  const data = await res.json();
+  return data.url;
 }
 
 // ─────────────────────────────────────────────
@@ -103,10 +168,8 @@ app.post('/tracks/upload', upload.single('file'), async (req, res) => {
     const { title, artist } = req.body;
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
-
-    const fileName = `${Date.now()}_${file.originalname.replace(/\s+/g, '_')}`;
-    console.log(`[/upload] ${fileName} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
-
+    const fileName = Date.now() + '_' + file.originalname.replace(/\s+/g, '_');
+    console.log('[/upload] ' + fileName + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)');
     const fileUrl = await b2Upload(file.buffer, fileName, file.mimetype);
     const { data: track, error: dbError } = await supabase
       .from('tracks')
@@ -137,29 +200,23 @@ app.delete('/tracks/:id', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// SEARCH — через VK Audio
+// SEARCH — через SoundCloud
 // ─────────────────────────────────────────────
 
 app.get('/search', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'Query required' });
   try {
-    const response = await vkCall('audio.search', {
+    const data = await scFetch('/search/tracks', {
       q,
-      count: 20,
-      sort: 0,
+      limit: 20,
+      filter: 'streamable',
     });
-    const items = response.items || [];
-    // Диагностика: логируем первые 3 трека чтобы видеть структуру url
-    items.slice(0, 3).forEach((a, i) => {
-      const urlPreview = a.url ? a.url.substring(0, 80) : 'EMPTY';
-      const isHLS = a.url && a.url.includes('.m3u8');
-      console.log(`[/search] [${i}] "${a.artist} - ${a.title}" | url: ${urlPreview}... | HLS: ${isHLS}`);
-    });
-    const tracks = items
-      .filter(a => a.url)
-      .map(formatTrack);
-    console.log(`[/search] Found ${tracks.length}/${items.length} with url for "${q}"`);
+    const tracks = (data.collection || [])
+      .filter(t => t.streamable && t.media?.transcodings?.length > 0)
+      .map(formatSCTrack)
+      .filter(t => t.stream_url);
+    console.log('[/search] Found ' + tracks.length + ' for "' + q + '"');
     res.json(tracks);
   } catch (err) {
     console.error('[/search] Error:', err.message);
@@ -168,44 +225,27 @@ app.get('/search', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// STREAM — проксируем аудио с VK (mp3 + HLS m3u8)
+// STREAM — проксируем аудио с SoundCloud
 // ─────────────────────────────────────────────
 
-const VK_HEADERS = {
-  'User-Agent': 'VKAndroidApp/7.14-12584 (Android 12; SDK 32; arm64-v8a; samsung SM-G998B; ru)',
-  'Referer': 'https://vk.com/',
-};
-
-// Скачать HLS плейлист и собрать все .ts сегменты в один поток
 async function streamHLS(m3u8Url, res) {
   const base = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
-  const playlistRes = await fetch(m3u8Url, { headers: VK_HEADERS });
-  if (!playlistRes.ok) throw new Error(`HLS playlist HTTP ${playlistRes.status}`);
+  const playlistRes = await fetch(m3u8Url, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://soundcloud.com/' }
+  });
+  if (!playlistRes.ok) throw new Error('HLS playlist HTTP ' + playlistRes.status);
   const playlist = await playlistRes.text();
-
-  // Извлекаем .ts сегменты
-  const segments = playlist.split('\n')
-    .map(l => l.trim())
-    .filter(l => l && !l.startsWith('#'));
-
-  if (segments.length === 0) throw new Error('No HLS segments found');
-
-  console.log(`[/stream] HLS: ${segments.length} segments`);
-
+  const segments = playlist.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  if (segments.length === 0) throw new Error('No HLS segments');
+  console.log('[/stream] HLS: ' + segments.length + ' segments');
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Transfer-Encoding', 'chunked');
-
   for (const seg of segments) {
     const segUrl = seg.startsWith('http') ? seg : base + seg;
     try {
-      const segRes = await fetch(segUrl, { headers: VK_HEADERS });
-      if (!segRes.ok) continue;
-      const buf = Buffer.from(await segRes.arrayBuffer());
-      res.write(buf);
-    } catch (e) {
-      console.warn(`[/stream] Segment error: ${e.message}`);
-    }
+      const segRes = await fetch(segUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (segRes.ok) res.write(Buffer.from(await segRes.arrayBuffer()));
+    } catch (e) {}
   }
   res.end();
 }
@@ -213,16 +253,18 @@ async function streamHLS(m3u8Url, res) {
 app.get('/stream', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'URL required' });
-  const decoded = decodeURIComponent(url);
   try {
-    const isHLS = decoded.includes('.m3u8');
-    console.log(`[/stream] ${isHLS ? 'HLS' : 'MP3'}: ${decoded.substring(0, 60)}...`);
-
+    const decoded = decodeURIComponent(url);
+    const realUrl = await resolveSCStreamUrl(decoded);
+    const isHLS = realUrl.includes('.m3u8');
+    console.log('[/stream] ' + (isHLS ? 'HLS' : 'MP3') + ': resolved OK');
     if (isHLS) {
-      await streamHLS(decoded, res);
+      await streamHLS(realUrl, res);
     } else {
-      const audioRes = await fetch(decoded, { headers: VK_HEADERS });
-      if (!audioRes.ok) throw new Error(`Upstream HTTP ${audioRes.status}`);
+      const audioRes = await fetch(realUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://soundcloud.com/' }
+      });
+      if (!audioRes.ok) throw new Error('Upstream HTTP ' + audioRes.status);
       res.setHeader('Content-Type', audioRes.headers.get('content-type') || 'audio/mpeg');
       res.setHeader('Access-Control-Allow-Origin', '*');
       if (audioRes.headers.get('content-length')) {
@@ -238,46 +280,44 @@ app.get('/stream', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// DOWNLOAD — скачать трек с VK → B2
+// DOWNLOAD — скачать трек с SoundCloud → B2
 // ─────────────────────────────────────────────
 
 async function downloadHLSToBuffer(m3u8Url) {
   const base = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
-  const playlistRes = await fetch(m3u8Url, { headers: VK_HEADERS });
-  if (!playlistRes.ok) throw new Error(`HLS playlist HTTP ${playlistRes.status}`);
+  const playlistRes = await fetch(m3u8Url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!playlistRes.ok) throw new Error('HLS playlist HTTP ' + playlistRes.status);
   const playlist = await playlistRes.text();
   const segments = playlist.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   const chunks = [];
   for (const seg of segments) {
     const segUrl = seg.startsWith('http') ? seg : base + seg;
-    const segRes = await fetch(segUrl, { headers: VK_HEADERS });
+    const segRes = await fetch(segUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (segRes.ok) chunks.push(Buffer.from(await segRes.arrayBuffer()));
   }
   return Buffer.concat(chunks);
 }
 
 app.post('/download', async (req, res) => {
-  const { vk_id, stream_url, title, artist } = req.body;
+  const { sc_id, stream_url, title, artist } = req.body;
   if (!stream_url) return res.status(400).json({ error: 'stream_url required' });
   try {
-    console.log(`[/download] Starting: ${title}`);
+    console.log('[/download] Starting: ' + title);
     const decoded = decodeURIComponent(stream_url);
-    const isHLS = decoded.includes('.m3u8');
-
+    const realUrl = await resolveSCStreamUrl(decoded);
+    const isHLS = realUrl.includes('.m3u8');
     let fileBuffer;
     if (isHLS) {
-      console.log(`[/download] HLS mode`);
-      fileBuffer = await downloadHLSToBuffer(decoded);
+      console.log('[/download] HLS mode');
+      fileBuffer = await downloadHLSToBuffer(realUrl);
     } else {
-      const audioRes = await fetch(decoded, { headers: VK_HEADERS });
-      if (!audioRes.ok) throw new Error(`Download HTTP ${audioRes.status}`);
+      const audioRes = await fetch(realUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!audioRes.ok) throw new Error('Download HTTP ' + audioRes.status);
       fileBuffer = Buffer.from(await audioRes.arrayBuffer());
     }
-    console.log(`[/download] Downloaded: ${(fileBuffer.length / 1024 / 1024).toFixed(1)} MB`);
-
-    const fileName = `vk_${vk_id}_${Date.now()}.mp3`;
+    console.log('[/download] Downloaded: ' + (fileBuffer.length / 1024 / 1024).toFixed(1) + ' MB');
+    const fileName = 'sc_' + (sc_id || Date.now()) + '_' + Date.now() + '.mp3';
     const fileUrl = await b2Upload(fileBuffer, fileName, 'audio/mpeg');
-
     const { data: track, error: dbError } = await supabase
       .from('tracks')
       .insert({
@@ -285,12 +325,11 @@ app.post('/download', async (req, res) => {
         artist: artist || 'Unknown',
         file_url: fileUrl,
         file_name: fileName,
-        source: 'vk_saved',
+        source: 'sc_saved',
       })
       .select().single();
     if (dbError) return res.status(500).json({ error: dbError.message });
-
-    console.log(`[/download] Saved: ${fileName}`);
+    console.log('[/download] Saved: ' + fileName);
     res.json(track);
   } catch (err) {
     console.error('[/download] Error:', err.message);
@@ -298,6 +337,12 @@ app.post('/download', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', mode: 'vk' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', mode: 'soundcloud' }));
 
-app.listen(PORT, () => console.log(`MusicApp backend running on port ${PORT}`));
+// Получаем client_id сразу при старте
+getSCClientId().then(id => {
+  if (id) console.log('[SC] client_id ready');
+  else console.warn('[SC] WARNING: could not get client_id on startup');
+});
+
+app.listen(PORT, () => console.log('MusicApp backend running on port ' + PORT));
