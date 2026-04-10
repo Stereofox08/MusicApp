@@ -24,12 +24,14 @@ function EqBars({ active }) {
 }
 
 function TrackRow({ track, isPlaying, isCurrent, onPlay, onDelete, onSave, isSaving }) {
+  const isVK = track.source === 'vk';
   const isYT = track.source === 'youtube';
-  const isSaved = track.source === 'youtube_saved';
+  const isSaved = track.source === 'youtube_saved' || track.source === 'vk_saved';
+  const isOnline = isVK || isYT;
 
-  const badgeBg = isYT ? 'rgba(255,0,0,0.15)' : isSaved ? 'rgba(200,240,96,0.1)' : 'rgba(124,106,240,0.15)';
-  const badgeColor = isYT ? '#ff4444' : isSaved ? 'var(--accent)' : '#7c6af0';
-  const badgeLabel = isYT ? 'YT' : isSaved ? 'YT✓' : 'MY';
+  const badgeBg = isVK ? 'rgba(0,119,255,0.15)' : isYT ? 'rgba(255,0,0,0.15)' : isSaved ? 'rgba(200,240,96,0.1)' : 'rgba(124,106,240,0.15)';
+  const badgeColor = isVK ? '#0077ff' : isYT ? '#ff4444' : isSaved ? 'var(--accent)' : '#7c6af0';
+  const badgeLabel = isVK ? 'VK' : isYT ? 'YT' : isSaved ? '✓' : 'MY';
 
   return (
     <div onClick={onPlay} style={{
@@ -78,8 +80,8 @@ function TrackRow({ track, isPlaying, isCurrent, onPlay, onDelete, onSave, isSav
         </span>
       )}
 
-      {/* YouTube результат — кнопка сохранить в библиотеку */}
-      {isYT && onSave && (
+      {/* VK/YT результат — кнопка сохранить в библиотеку */}
+      {isOnline && onSave && (
         <button onClick={e => { e.stopPropagation(); onSave(track); }} disabled={isSaving} style={{
           width: 32, height: 32, borderRadius: 8, background: 'var(--surface2)',
           color: isSaving ? 'var(--muted)' : '#7c6af0', fontSize: 18,
@@ -90,7 +92,7 @@ function TrackRow({ track, isPlaying, isCurrent, onPlay, onDelete, onSave, isSav
       )}
 
       {/* Своя музыка — кнопка удалить */}
-      {!isYT && onDelete && (
+      {!isOnline && onDelete && (
         <button onClick={e => { e.stopPropagation(); onDelete(track.id); }} style={{
           width: 28, height: 28, borderRadius: 6, background: 'var(--surface2)',
           color: 'var(--muted)', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -195,154 +197,79 @@ function PlayerBar({ track, audioRef, isPlaying, setIsPlaying }) {
 }
 
 function UploadModal({ onClose, onUploaded }) {
-  const [files, setFiles] = useState([]); // [{ file, title, artist, status }]
-  const [uploading, setUploading] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
+  const [file, setFile] = useState(null);
+  const [title, setTitle] = useState('');
+  const [artist, setArtist] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const inputStyle = {
-    flex: 1, padding: '6px 10px', borderRadius: 6,
-    background: 'var(--surface2)', border: '1px solid var(--border)',
-    color: 'var(--text)', fontSize: 13, outline: 'none', minWidth: 0
+    width: '100%', padding: '10px 14px', borderRadius: 8,
+    background: 'var(--surface)', border: '1px solid var(--border)',
+    color: 'var(--text)', fontSize: 14, outline: 'none'
   };
-
-  const addFiles = (newFiles) => {
-    const audioFiles = Array.from(newFiles).filter(f => f.type.startsWith('audio/'));
-    setFiles(prev => [
-      ...prev,
-      ...audioFiles.map(f => ({
-        file: f,
-        title: f.name.replace(/\.[^.]+$/, ''),
-        artist: '',
-        status: 'pending', // pending | uploading | done | error
-      }))
-    ]);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setDragOver(false);
-    addFiles(e.dataTransfer.files);
-  };
-
-  const removeFile = (idx) => setFiles(f => f.filter((_, i) => i !== idx));
-
-  const updateFile = (idx, key, val) =>
-    setFiles(f => f.map((item, i) => i === idx ? { ...item, [key]: val } : item));
 
   const handleSubmit = async () => {
-    if (files.length === 0) return;
-    setUploading(true);
-
-    for (let i = 0; i < files.length; i++) {
-      if (files[i].status === 'done') continue;
-      updateFile(i, 'status', 'uploading');
-      try {
-        const track = await api.uploadTrack(files[i].file, files[i].title, files[i].artist);
-        if (track.error) throw new Error(track.error);
-        onUploaded(track);
-        updateFile(i, 'status', 'done');
-      } catch {
-        updateFile(i, 'status', 'error');
-      }
+    if (!file) return setError('Выбери файл');
+    setLoading(true); setError('');
+    try {
+      const track = await api.uploadTrack(file, title, artist);
+      if (track.error) throw new Error(track.error);
+      onUploaded(track);
+      onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
     }
-
-    setUploading(false);
-    // Закрываем только если все успешно
-    setFiles(prev => {
-      if (prev.every(f => f.status === 'done')) setTimeout(onClose, 600);
-      return prev;
-    });
   };
-
-  const pendingCount = files.filter(f => f.status !== 'done').length;
 
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, padding: 16
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200
     }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{
         background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16,
-        padding: 28, width: '100%', maxWidth: 520, display: 'flex', flexDirection: 'column', gap: 16,
-        animation: 'slideUp 0.25s ease', maxHeight: '85vh', overflow: 'hidden'
+        padding: 32, width: '100%', maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 16,
+        animation: 'slideUp 0.25s ease'
       }}>
-        <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 22, fontWeight: 800 }}>
-          Загрузить треки
-        </h2>
+        <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 22, fontWeight: 800 }}>Загрузить трек</h2>
 
-        {/* Drop zone */}
-        <label
-          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
-          style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            gap: 8, padding: '20px 16px', borderRadius: 10,
-            border: `2px dashed ${dragOver ? 'var(--accent)' : 'var(--border)'}`,
-            cursor: 'pointer', transition: 'all 0.2s',
-            background: dragOver ? 'rgba(200,240,96,0.06)' : 'transparent',
-            flexShrink: 0
-          }}>
-          <span style={{ fontSize: 28 }}>🎵</span>
-          <span style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center' }}>
-            Кликни или перетащи сюда MP3/WAV/FLAC<br />
-            <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Можно выбрать несколько файлов сразу</span>
+        <label style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: 8, padding: '24px 16px', borderRadius: 10,
+          border: `2px dashed ${file ? 'var(--accent)' : 'var(--border)'}`,
+          cursor: 'pointer', transition: 'border-color 0.2s',
+          background: file ? 'rgba(200,240,96,0.04)' : 'transparent'
+        }}>
+          <span style={{ fontSize: 32 }}>🎵</span>
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}>
+            {file ? file.name : 'Кликни или перетащи MP3/WAV/FLAC'}
           </span>
-          <input type="file" accept="audio/*" multiple style={{ display: 'none' }}
-            onChange={e => addFiles(e.target.files)} />
+          <input type="file" accept="audio/*" style={{ display: 'none' }}
+            onChange={e => {
+              const f = e.target.files[0];
+              if (f) { setFile(f); setTitle(f.name.replace(/\.[^.]+$/, '')); }
+            }} />
         </label>
 
-        {/* File list */}
-        {files.length > 0 && (
-          <div style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 280 }}>
-            {files.map((item, i) => (
-              <div key={i} style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '8px 10px', borderRadius: 8,
-                background: item.status === 'done' ? 'rgba(200,240,96,0.06)' :
-                            item.status === 'error' ? 'rgba(255,80,80,0.06)' : 'var(--surface2)',
-                border: `1px solid ${item.status === 'done' ? 'rgba(200,240,96,0.2)' :
-                                     item.status === 'error' ? 'rgba(255,80,80,0.2)' : 'var(--border)'}`,
-              }}>
-                {/* Status icon */}
-                <span style={{ fontSize: 16, flexShrink: 0 }}>
-                  {item.status === 'done' ? '✓' :
-                   item.status === 'error' ? '✕' :
-                   item.status === 'uploading' ? '↻' : '♪'}
-                </span>
+        <input style={inputStyle} placeholder="Название" value={title} onChange={e => setTitle(e.target.value)} />
+        <input style={inputStyle} placeholder="Артист" value={artist} onChange={e => setArtist(e.target.value)} />
 
-                {/* Title & Artist inputs */}
-                <input style={inputStyle} value={item.title}
-                  onChange={e => updateFile(i, 'title', e.target.value)}
-                  placeholder="Название" disabled={item.status === 'uploading' || item.status === 'done'} />
-                <input style={{ ...inputStyle, maxWidth: 120 }} value={item.artist}
-                  onChange={e => updateFile(i, 'artist', e.target.value)}
-                  placeholder="Артист" disabled={item.status === 'uploading' || item.status === 'done'} />
+        {error && <div style={{ color: 'var(--danger)', fontSize: 13 }}>{error}</div>}
 
-                {/* Remove */}
-                {item.status !== 'uploading' && item.status !== 'done' && (
-                  <button onClick={() => removeFile(i)} style={{
-                    width: 24, height: 24, borderRadius: 6, background: 'transparent',
-                    color: 'var(--muted)', fontSize: 14, flexShrink: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}>✕</button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 10, flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 10 }}>
           <button onClick={onClose} style={{
             flex: 1, padding: '12px', borderRadius: 8, border: '1px solid var(--border)',
             color: 'var(--muted)', fontSize: 14
           }}>Отмена</button>
-          <button onClick={handleSubmit} disabled={uploading || files.length === 0} style={{
+          <button onClick={handleSubmit} disabled={loading} style={{
             flex: 2, padding: '12px', borderRadius: 8,
-            background: uploading || files.length === 0 ? 'var(--border)' : 'var(--accent)',
+            background: loading ? 'var(--border)' : 'var(--accent)',
             color: '#000', fontWeight: 700, fontSize: 14, fontFamily: 'var(--font-display)',
           }}>
-            {uploading ? `Загружаю...` : `Загрузить${pendingCount > 1 ? ` (${pendingCount})` : ''}`}
+            {loading ? 'Загружаю...' : 'Загрузить'}
           </button>
         </div>
       </div>
@@ -380,11 +307,11 @@ export default function App() {
       try { await audio.play(); setIsPlaying(true); } catch { setIsPlaying(false); }
     };
 
-if (currentTrack.source === 'youtube' && currentTrack.youtube_id) {
-  play(`${BASE}/stream?id=${currentTrack.youtube_id}`);
-} else {
-  play(currentTrack.file_url);
-}
+    if (currentTrack.source === 'vk' && currentTrack.stream_url) {
+      play(`${BASE}/stream?url=${encodeURIComponent(currentTrack.stream_url)}`);
+    } else {
+      play(currentTrack.file_url);
+    }
 
     audio.onended = () => setIsPlaying(false);
   }, [currentTrack]);
