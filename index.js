@@ -389,7 +389,7 @@ app.post('/download', async (req, res) => {
 app.get('/proxy', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'URL required' });
-  const decoded = decodeURIComponent(url);
+  const decoded = decodeURIComponent(url).replace(/([^:]\/)\/+/g, "$1");
 
   // Разрешаем только наш B2 bucket — защита от открытого прокси
   const allowedHost = (process.env.B2_PUBLIC_URL || '').replace(/\/$/, '');
