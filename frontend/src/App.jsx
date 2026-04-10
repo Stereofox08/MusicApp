@@ -24,14 +24,13 @@ function EqBars({ active }) {
 }
 
 function TrackRow({ track, isPlaying, isCurrent, onPlay, onDelete, onSave, isSaving }) {
-  const isVK = track.source === 'vk';
-  const isYT = track.source === 'youtube';
-  const isSaved = track.source === 'youtube_saved' || track.source === 'vk_saved';
-  const isOnline = isVK || isYT;
+  const isSC = track.source === 'soundcloud';
+  const isSaved = track.source === 'sc_saved' || track.source === 'vk_saved' || track.source === 'youtube_saved';
+  const isOnline = isSC;
 
-  const badgeBg = isVK ? 'rgba(0,119,255,0.15)' : isYT ? 'rgba(255,0,0,0.15)' : isSaved ? 'rgba(200,240,96,0.1)' : 'rgba(124,106,240,0.15)';
-  const badgeColor = isVK ? '#0077ff' : isYT ? '#ff4444' : isSaved ? 'var(--accent)' : '#7c6af0';
-  const badgeLabel = isVK ? 'VK' : isYT ? 'YT' : isSaved ? '✓' : 'MY';
+  const badgeBg = isSC ? 'rgba(255,85,0,0.15)' : isSaved ? 'rgba(200,240,96,0.1)' : 'rgba(124,106,240,0.15)';
+  const badgeColor = isSC ? '#ff5500' : isSaved ? 'var(--accent)' : '#7c6af0';
+  const badgeLabel = isSC ? 'SC' : isSaved ? '✓' : 'MY';
 
   return (
     <div onClick={onPlay} style={{
@@ -307,7 +306,7 @@ export default function App() {
       try { await audio.play(); setIsPlaying(true); } catch { setIsPlaying(false); }
     };
 
-    if (currentTrack.source === 'vk' && currentTrack.stream_url) {
+    if (currentTrack.source === 'soundcloud' && currentTrack.stream_url) {
       play(`${BASE}/stream?url=${encodeURIComponent(currentTrack.stream_url)}`);
     } else {
       play(currentTrack.file_url);
@@ -477,7 +476,7 @@ export default function App() {
                 <div style={{ marginTop: 16, fontFamily: 'var(--font-display)', fontSize: 18 }}>
                   Поиск музыки
                 </div>
-                <div style={{ marginTop: 8, fontSize: 14 }}>Результаты из ВКонтакте • нажми ＋ чтобы сохранить офлайн</div>
+                <div style={{ marginTop: 8, fontSize: 14 }}>Результаты из SoundCloud • нажми ＋ чтобы сохранить офлайн</div>
               </div>
             )}
           </div>

@@ -33,9 +33,8 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        vk_id: track.vk_id,
+        sc_id: track.sc_id,
         stream_url: track.stream_url,
-        youtube_id: track.youtube_id,
         title: track.title,
         artist: track.artist,
       }),
