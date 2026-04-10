@@ -477,7 +477,7 @@ export default function App() {
                 <div style={{ marginTop: 16, fontFamily: 'var(--font-display)', fontSize: 18 }}>
                   Поиск музыки
                 </div>
-                <div style={{ marginTop: 8, fontSize: 14 }}>Результаты с YouTube • нажми ＋ чтобы сохранить офлайн</div>
+                <div style={{ marginTop: 8, fontSize: 14 }}>Результаты из ВКонтакте • нажми ＋ чтобы сохранить офлайн</div>
               </div>
             )}
           </div>
