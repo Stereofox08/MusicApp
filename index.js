@@ -23,12 +23,14 @@ const b2 = new S3Client({
   },
 });
 
+// ФИX #1: добавлен ACL public-read чтобы файлы были публично доступны
 async function b2Upload(buffer, fileName, contentType) {
   await b2.send(new PutObjectCommand({
     Bucket: process.env.B2_BUCKET_NAME,
     Key: fileName,
     Body: buffer,
     ContentType: contentType,
+    ACL: 'public-read',
   }));
   return `${process.env.B2_PUBLIC_URL}/${fileName}`;
 }
@@ -57,7 +59,7 @@ const upload = multer({
 
 let SC_CLIENT_ID = process.env.SC_CLIENT_ID || null;
 let SC_CLIENT_ID_FETCHED_AT = 0;
-const SC_CLIENT_ID_TTL = 1000 * 60 * 60 * 6; // обновлять каждые 6 часов
+const SC_CLIENT_ID_TTL = 1000 * 60 * 60 * 6;
 
 async function fetchSCClientId() {
   try {
@@ -74,7 +76,7 @@ async function fetchSCClientId() {
       const js = await jsRes.text();
       const match = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/);
       if (match) {
-        console.log('[SC] Got client_id from bundle: ' + match[1].substring(0, 8) + '...');
+        console.log('[SC] Got client_id: ' + match[1].substring(0, 8) + '...');
         return match[1];
       }
     }
@@ -87,15 +89,10 @@ async function fetchSCClientId() {
 
 async function getSCClientId() {
   const now = Date.now();
-  if (SC_CLIENT_ID && (now - SC_CLIENT_ID_FETCHED_AT) < SC_CLIENT_ID_TTL) {
-    return SC_CLIENT_ID;
-  }
+  if (SC_CLIENT_ID && (now - SC_CLIENT_ID_FETCHED_AT) < SC_CLIENT_ID_TTL) return SC_CLIENT_ID;
   console.log('[SC] Refreshing client_id...');
   const id = await fetchSCClientId();
-  if (id) {
-    SC_CLIENT_ID = id;
-    SC_CLIENT_ID_FETCHED_AT = now;
-  }
+  if (id) { SC_CLIENT_ID = id; SC_CLIENT_ID_FETCHED_AT = now; }
   return SC_CLIENT_ID;
 }
 
@@ -136,6 +133,7 @@ function formatSCTrack(track) {
   };
 }
 
+// FIX #3: резолвим URL прямо перед использованием — SC ссылки живут ~1 мин
 async function resolveSCStreamUrl(transcoding_url) {
   const clientId = await getSCClientId();
   const url = new URL(transcoding_url);
@@ -171,6 +169,7 @@ app.post('/tracks/upload', upload.single('file'), async (req, res) => {
     const fileName = Date.now() + '_' + file.originalname.replace(/\s+/g, '_');
     console.log('[/upload] ' + fileName + ' (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)');
     const fileUrl = await b2Upload(file.buffer, fileName, file.mimetype);
+    console.log('[/upload] B2 url: ' + fileUrl);
     const { data: track, error: dbError } = await supabase
       .from('tracks')
       .insert({
@@ -207,11 +206,7 @@ app.get('/search', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'Query required' });
   try {
-    const data = await scFetch('/search/tracks', {
-      q,
-      limit: 20,
-      filter: 'streamable',
-    });
+    const data = await scFetch('/search/tracks', { q, limit: 20, filter: 'streamable' });
     const tracks = (data.collection || [])
       .filter(t => t.streamable && t.media?.transcodings?.length > 0)
       .map(formatSCTrack)
@@ -225,9 +220,10 @@ app.get('/search', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// STREAM — проксируем аудио с SoundCloud
+// STREAM — FIX #2: поддержка Range для перемотки
 // ─────────────────────────────────────────────
 
+// HLS стримим целиком (перемотка внутри HLS не нужна — браузер и так получит всё)
 async function streamHLS(m3u8Url, res) {
   const base = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
   const playlistRes = await fetch(m3u8Url, {
@@ -238,16 +234,19 @@ async function streamHLS(m3u8Url, res) {
   const segments = playlist.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   if (segments.length === 0) throw new Error('No HLS segments');
   console.log('[/stream] HLS: ' + segments.length + ' segments');
-  res.setHeader('Content-Type', 'audio/mpeg');
-  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  // Сначала собираем весь буфер чтобы знать размер — это позволяет перемотку
+  const chunks = [];
   for (const seg of segments) {
     const segUrl = seg.startsWith('http') ? seg : base + seg;
     try {
       const segRes = await fetch(segUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      if (segRes.ok) res.write(Buffer.from(await segRes.arrayBuffer()));
+      if (segRes.ok) chunks.push(Buffer.from(await segRes.arrayBuffer()));
     } catch (e) {}
   }
-  res.end();
+  const fullBuffer = Buffer.concat(chunks);
+  console.log('[/stream] HLS assembled: ' + (fullBuffer.length / 1024 / 1024).toFixed(1) + ' MB');
+  return fullBuffer;
 }
 
 app.get('/stream', async (req, res) => {
@@ -255,22 +254,58 @@ app.get('/stream', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'URL required' });
   try {
     const decoded = decodeURIComponent(url);
+    // Резолвим прямо сейчас — SC ссылки живут ~1 мин
     const realUrl = await resolveSCStreamUrl(decoded);
     const isHLS = realUrl.includes('.m3u8');
     console.log('[/stream] ' + (isHLS ? 'HLS' : 'MP3') + ': resolved OK');
+
     if (isHLS) {
-      await streamHLS(realUrl, res);
-    } else {
-      const audioRes = await fetch(realUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://soundcloud.com/' }
-      });
-      if (!audioRes.ok) throw new Error('Upstream HTTP ' + audioRes.status);
-      res.setHeader('Content-Type', audioRes.headers.get('content-type') || 'audio/mpeg');
+      // HLS: собираем буфер и отдаём с Range поддержкой
+      const fullBuffer = await streamHLS(realUrl, res);
+      const total = fullBuffer.length;
+      const rangeHeader = req.headers['range'];
+
+      res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Access-Control-Allow-Origin', '*');
-      if (audioRes.headers.get('content-length')) {
-        res.setHeader('Content-Length', audioRes.headers.get('content-length'));
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      if (rangeHeader) {
+        const [startStr, endStr] = rangeHeader.replace('bytes=', '').split('-');
+        const start = parseInt(startStr, 10);
+        const end = endStr ? parseInt(endStr, 10) : total - 1;
+        const chunkSize = end - start + 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+        res.setHeader('Content-Length', chunkSize);
+        res.end(fullBuffer.slice(start, end + 1));
+      } else {
+        res.setHeader('Content-Length', total);
+        res.end(fullBuffer);
       }
-      audioRes.body.pipe(res);
+    } else {
+      // Progressive MP3: форвардим с поддержкой Range
+      const rangeHeader = req.headers['range'];
+      const upstreamRes = await fetch(realUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Referer': 'https://soundcloud.com/',
+          ...(rangeHeader ? { 'Range': rangeHeader } : {}),
+        }
+      });
+      if (!upstreamRes.ok && upstreamRes.status !== 206) {
+        throw new Error('Upstream HTTP ' + upstreamRes.status);
+      }
+      res.status(upstreamRes.status);
+      res.setHeader('Content-Type', upstreamRes.headers.get('content-type') || 'audio/mpeg');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Accept-Ranges', 'bytes');
+      if (upstreamRes.headers.get('content-length')) {
+        res.setHeader('Content-Length', upstreamRes.headers.get('content-length'));
+      }
+      if (upstreamRes.headers.get('content-range')) {
+        res.setHeader('Content-Range', upstreamRes.headers.get('content-range'));
+      }
+      upstreamRes.body.pipe(res);
     }
   } catch (err) {
     console.error('[/stream] Error:', err.message);
@@ -303,21 +338,30 @@ app.post('/download', async (req, res) => {
   if (!stream_url) return res.status(400).json({ error: 'stream_url required' });
   try {
     console.log('[/download] Starting: ' + title);
+
+    // FIX #3: резолвим URL прямо сейчас — он мог протухнуть пока пользователь думал
     const decoded = decodeURIComponent(stream_url);
     const realUrl = await resolveSCStreamUrl(decoded);
+    console.log('[/download] Resolved stream URL OK');
+
     const isHLS = realUrl.includes('.m3u8');
     let fileBuffer;
     if (isHLS) {
       console.log('[/download] HLS mode');
       fileBuffer = await downloadHLSToBuffer(realUrl);
     } else {
-      const audioRes = await fetch(realUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const audioRes = await fetch(realUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://soundcloud.com/' }
+      });
       if (!audioRes.ok) throw new Error('Download HTTP ' + audioRes.status);
       fileBuffer = Buffer.from(await audioRes.arrayBuffer());
     }
     console.log('[/download] Downloaded: ' + (fileBuffer.length / 1024 / 1024).toFixed(1) + ' MB');
+
     const fileName = 'sc_' + (sc_id || Date.now()) + '_' + Date.now() + '.mp3';
     const fileUrl = await b2Upload(fileBuffer, fileName, 'audio/mpeg');
+    console.log('[/download] B2 url: ' + fileUrl);
+
     const { data: track, error: dbError } = await supabase
       .from('tracks')
       .insert({
@@ -329,7 +373,7 @@ app.post('/download', async (req, res) => {
       })
       .select().single();
     if (dbError) return res.status(500).json({ error: dbError.message });
-    console.log('[/download] Saved: ' + fileName);
+    console.log('[/download] Saved to library: ' + fileName);
     res.json(track);
   } catch (err) {
     console.error('[/download] Error:', err.message);
@@ -339,7 +383,6 @@ app.post('/download', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', mode: 'soundcloud' }));
 
-// Получаем client_id сразу при старте
 getSCClientId().then(id => {
   if (id) console.log('[SC] client_id ready');
   else console.warn('[SC] WARNING: could not get client_id on startup');
