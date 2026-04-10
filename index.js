@@ -381,6 +381,49 @@ app.post('/download', async (req, res) => {
   }
 });
 
+
+// ─────────────────────────────────────────────
+// PROXY — оффлайн треки из B2 через бэкенд (решает CORS + Range)
+// ─────────────────────────────────────────────
+
+app.get('/proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'URL required' });
+  const decoded = decodeURIComponent(url);
+
+  // Разрешаем только наш B2 bucket — защита от открытого прокси
+  const allowedHost = (process.env.B2_PUBLIC_URL || '').replace(/\/$/, '');
+  if (allowedHost && !decoded.startsWith(allowedHost)) {
+    console.error('[/proxy] Blocked URL: ' + decoded.substring(0, 60));
+    return res.status(403).json({ error: 'URL not allowed' });
+  }
+
+  try {
+    const rangeHeader = req.headers['range'];
+    console.log('[/proxy] ' + (rangeHeader ? 'Range: ' + rangeHeader + ' | ' : '') + decoded.substring(0, 60) + '...');
+
+    const b2Res = await fetch(decoded, {
+      headers: rangeHeader ? { 'Range': rangeHeader } : {}
+    });
+
+    if (!b2Res.ok && b2Res.status !== 206) {
+      console.error('[/proxy] B2 returned ' + b2Res.status + ' for: ' + decoded);
+      return res.status(b2Res.status).json({ error: 'B2 returned HTTP ' + b2Res.status });
+    }
+
+    res.status(b2Res.status);
+    res.setHeader('Content-Type', b2Res.headers.get('content-type') || 'audio/mpeg');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (b2Res.headers.get('content-length')) res.setHeader('Content-Length', b2Res.headers.get('content-length'));
+    if (b2Res.headers.get('content-range')) res.setHeader('Content-Range', b2Res.headers.get('content-range'));
+    b2Res.body.pipe(res);
+  } catch (err) {
+    console.error('[/proxy] Error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok', mode: 'soundcloud' }));
 
 getSCClientId().then(id => {
