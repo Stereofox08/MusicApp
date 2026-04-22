@@ -15,7 +15,8 @@ async function sbFetch(path, options = {}) {
   };
   const res = await fetch(`${SB_URL}/rest/v1${path}`, { ...options, headers });
   if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
-  return res.json();
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 export default async function handler(req, res) {
