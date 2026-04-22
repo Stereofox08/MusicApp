@@ -3,9 +3,10 @@
     { "source": "/api/search",           "destination": "/api/search" },
     { "source": "/api/stream",           "destination": "/api/stream" },
     { "source": "/api/tracks",           "destination": "/api/tracks" },
-    { "source": "/api/upload",           "destination": "/api/upload" },
-    { "source": "/api/playlists",        "destination": "/api/playlists" },
+    { "source": "/api/presign",          "destination": "/api/presign" },
+    { "source": "/api/save",             "destination": "/api/save" },
     { "source": "/api/playlists/tracks", "destination": "/api/playlists" },
+    { "source": "/api/playlists",        "destination": "/api/playlists" },
     { "source": "/(.*)",                 "destination": "/index.html" }
   ]
 }
