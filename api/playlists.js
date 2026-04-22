@@ -5,20 +5,17 @@
 // DELETE /api/playlists/tracks      — удалить трек из плейлиста { playlist_id, track_id }
 import { setCors } from './_sc.js';
 
-const SB_URL = process.env.SUPABASE_URL;
-const SB_KEY = process.env.SUPABASE_SERVICE_KEY;
-
-const sbHeaders = {
-  'apikey':        SB_KEY,
-  'Authorization': `Bearer ${SB_KEY}`,
-  'Content-Type':  'application/json',
-};
-
 async function sbFetch(path, options = {}) {
-  const res = await fetch(`${SB_URL}/rest/v1${path}`, {
-    ...options,
-    headers: { ...sbHeaders, ...(options.headers || {}) },
-  });
+  const SB_URL = process.env.SUPABASE_URL;
+  const SB_KEY = process.env.SUPABASE_SERVICE_KEY;
+  if (!SB_URL || !SB_KEY) throw new Error('Supabase env vars missing');
+  const headers = {
+    'apikey':        SB_KEY,
+    'Authorization': `Bearer ${SB_KEY}`,
+    'Content-Type':  'application/json',
+    ...(options.headers || {}),
+  };
+  const res = await fetch(`${SB_URL}/rest/v1${path}`, { ...options, headers });
   if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
   const text = await res.text();
   return text ? JSON.parse(text) : null;
