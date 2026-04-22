@@ -11,21 +11,50 @@ export default function LibraryTab({ player, library }) {
   const handleFiles = async (files) => {
     if (!files?.length) return
     setUploading(true)
+    const total = files.length
     let done = 0
+
     for (const file of Array.from(files)) {
       try {
-        setProgress(Math.round((done / files.length) * 100))
-        // Парсим имя файла как "Artist - Title" если возможно
+        setProgress(Math.round((done / total) * 100))
+
+        // Парсим имя файла как "Artist - Title"
         const name   = file.name.replace(/\.[^.]+$/, '')
         const parts  = name.split(' - ')
         const title  = parts.length >= 2 ? parts.slice(1).join(' - ') : name
         const artist = parts.length >= 2 ? parts[0] : 'Unknown'
-        await api.uploadTrack(file, title, artist)
+
+        // Шаг 1: получаем presigned URL от бэкенда
+        const presignRes = await fetch('/api/presign', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ fileName: file.name, contentType: file.type || 'audio/mpeg' }),
+        })
+        const { uploadUrl, fileUrl, key, r2Token } = await presignRes.json()
+
+        // Шаг 2: загружаем файл напрямую в R2 (минуя Vercel)
+        await fetch(uploadUrl, {
+          method:  'PUT',
+          headers: {
+            'Authorization': `Bearer ${r2Token}`,
+            'Content-Type':  file.type || 'audio/mpeg',
+          },
+          body: file,
+        })
+
+        // Шаг 3: сохраняем метаданные в Supabase через бэкенд
+        await fetch('/api/save', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ title, artist, fileUrl, fileName: key }),
+        })
+
         done++
       } catch (e) {
-        console.error('Upload error:', e)
+        console.error('Upload error:', file.name, e)
       }
     }
+
     setUploading(false)
     setProgress(0)
     library.loadTracks()
