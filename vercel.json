@@ -1,6 +1,11 @@
 {
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/(.*)",     "destination": "/index.html" }
+    { "source": "/api/search",           "destination": "/api/search" },
+    { "source": "/api/stream",           "destination": "/api/stream" },
+    { "source": "/api/tracks",           "destination": "/api/tracks" },
+    { "source": "/api/upload",           "destination": "/api/upload" },
+    { "source": "/api/playlists",        "destination": "/api/playlists" },
+    { "source": "/api/playlists/tracks", "destination": "/api/playlists" },
+    { "source": "/(.*)",                 "destination": "/index.html" }
   ]
 }
