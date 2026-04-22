@@ -1,73 +1,84 @@
-// GET    /api/tracks          — все треки из библиотеки
-// POST   /api/tracks          — сохранить SC трек в библиотеку
-// DELETE /api/tracks?id=uuid  — удалить трек
-import { setCors } from './_sc.js';
+// GET /api/stream?url=<transcoding_url>
+import { resolveStreamUrl, setCors } from './_sc.js';
 
-const SB_URL = process.env.SUPABASE_URL;
-const SB_KEY = process.env.SUPABASE_SERVICE_KEY;
-const R2_ACCOUNT = process.env.R2_ACCOUNT_ID;
-const R2_BUCKET  = process.env.R2_BUCKET_NAME;
-const R2_TOKEN   = process.env.R2_TOKEN;
-
-const sbHeaders = {
-  'apikey':        SB_KEY,
-  'Authorization': `Bearer ${SB_KEY}`,
-  'Content-Type':  'application/json',
-};
-
-async function sbFetch(path, options = {}) {
-  const res = await fetch(`${SB_URL}/rest/v1${path}`, {
-    ...options,
-    headers: { ...sbHeaders, ...(options.headers || {}) },
-  });
-  if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
-  return res.json();
+async function assembleHLS(m3u8Url) {
+  const base     = m3u8Url.slice(0, m3u8Url.lastIndexOf('/') + 1);
+  const playlist = await fetch(m3u8Url).then(r => r.text());
+  const segments = playlist.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  const chunks   = await Promise.all(
+    segments.map(seg => {
+      const url = seg.startsWith('http') ? seg : base + seg;
+      return fetch(url).then(r => r.arrayBuffer()).catch(() => new ArrayBuffer(0));
+    })
+  );
+  const total  = chunks.reduce((s, c) => s + c.byteLength, 0);
+  const result = new Uint8Array(total);
+  let   offset = 0;
+  for (const c of chunks) { result.set(new Uint8Array(c), offset); offset += c.byteLength; }
+  return Buffer.from(result);
 }
 
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+
   try {
-    // GET — список всех треков
-    if (req.method === 'GET') {
-      const tracks = await sbFetch('/tracks?order=created_at.desc&select=*');
-      return res.json(tracks);
-    }
+    const realUrl = await resolveStreamUrl(decodeURIComponent(url));
+    const isHLS   = realUrl.includes('.m3u8');
 
-    // POST — сохранить SC трек в библиотеку (без загрузки файла)
-    if (req.method === 'POST') {
-      const { title, artist, duration, artwork, stream_url, permalink, sc_id } = req.body;
-      const track = await sbFetch('/tracks?select=*', {
-        method:  'POST',
-        headers: { 'Prefer': 'return=representation' },
-        body: JSON.stringify({ title, artist, duration, artwork_url: artwork, stream_url, permalink, sc_id, source: 'soundcloud' }),
-      });
-      return res.json(Array.isArray(track) ? track[0] : track);
-    }
-
-    // DELETE — удалить трек
-    if (req.method === 'DELETE') {
-      const { id } = req.query;
-      if (!id) return res.status(400).json({ error: 'id required' });
-
-      // Если это загруженный файл — удаляем из R2
-      const [track] = await sbFetch(`/tracks?id=eq.${id}&select=file_name`);
-      if (track?.file_name) {
-        const url = `https://${R2_ACCOUNT}.r2.cloudflarestorage.com/${R2_BUCKET}/${track.file_name}`;
-        await fetch(url, {
-          method:  'DELETE',
-          headers: { 'Authorization': `Bearer ${R2_TOKEN}` },
-        }).catch(() => {});
+    if (isHLS) {
+      const buf   = await assembleHLS(realUrl);
+      const total = buf.length;
+      const range = req.headers['range'];
+      res.setHeader('Content-Type',  'audio/mpeg');
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      if (range) {
+        const [s, e] = range.replace('bytes=', '').split('-');
+        const start  = parseInt(s, 10);
+        const end    = e ? parseInt(e, 10) : total - 1;
+        res.status(206);
+        res.setHeader('Content-Range',  `bytes ${start}-${end}/${total}`);
+        res.setHeader('Content-Length', end - start + 1);
+        res.end(buf.slice(start, end + 1));
+      } else {
+        res.setHeader('Content-Length', total);
+        res.end(buf);
       }
-
-      await sbFetch(`/tracks?id=eq.${id}`, { method: 'DELETE' });
-      return res.json({ success: true });
+    } else {
+      const range    = req.headers['range'];
+      const upstream = await fetch(realUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Referer':    'https://soundcloud.com/',
+          ...(range ? { Range: range } : {}),
+        }
+      });
+      res.status(upstream.status);
+      res.setHeader('Content-Type',  upstream.headers.get('content-type') || 'audio/mpeg');
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const cl = upstream.headers.get('content-length');
+      const cr = upstream.headers.get('content-range');
+      if (cl) res.setHeader('Content-Length', cl);
+      if (cr) res.setHeader('Content-Range',  cr);
+      const reader = upstream.body.getReader();
+      const pump   = async () => {
+        const { done, value } = await reader.read();
+        if (done) { res.end(); return; }
+        res.write(Buffer.from(value));
+        return pump();
+      };
+      await pump();
     }
-
-    res.status(405).end();
   } catch (e) {
-    console.error('[tracks]', e.message);
-    res.status(500).json({ error: e.message });
+    console.error('[stream]', e.message);
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+    else res.end();
   }
 }
+
+export const config = { api: { responseLimit: false } };
