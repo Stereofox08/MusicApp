@@ -80,7 +80,23 @@ export default function LibraryTab({ player, library }) {
   const [uploading,    setUploading]    = useState(false)
   const [uploadProgress, setProgress]  = useState(0)
   const [filter,       setFilter]      = useState('')
+  const [importing,    setImporting]   = useState(false)
+  const [importMsg,    setImportMsg]   = useState('')
   const fileInputRef                   = useRef()
+
+  const handleImport = async () => {
+    setImporting(true)
+    setImportMsg('')
+    try {
+      const res  = await fetch('/api/import', { method: 'POST' })
+      const data = await res.json()
+      setImportMsg(data.message || `Импортировано: ${data.imported}`)
+      if (data.imported > 0) library.loadTracks()
+    } catch (e) {
+      setImportMsg('Ошибка импорта: ' + e.message)
+    }
+    setImporting(false)
+  }
 
   const handleFiles = async (files) => {
     if (!files?.length) return
@@ -160,6 +176,14 @@ export default function LibraryTab({ player, library }) {
 
   return (
     <div className="tab-content">
+      {/* Импорт существующих файлов из R2 */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <button className="btn-primary" onClick={handleImport} disabled={importing}>
+          {importing ? '⏳ Импорт...' : '☁️ Импортировать из R2'}
+        </button>
+        {importMsg && <span style={{ fontSize: 13, color: 'var(--text2)' }}>{importMsg}</span>}
+      </div>
+
       {/* Загрузка файлов */}
       <div
         className="upload-zone"
