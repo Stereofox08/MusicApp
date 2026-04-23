@@ -30,15 +30,12 @@ export default function LibraryTab({ player, library }) {
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ fileName: file.name, contentType: file.type || 'audio/mpeg' }),
         })
-        const { uploadUrl, fileUrl, key, r2Token } = await presignRes.json()
+        const { uploadUrl, fileUrl, key } = await presignRes.json()
 
-        // Шаг 2: загружаем файл напрямую в R2 (минуя Vercel)
+        // Шаг 2: загружаем файл напрямую в R2 по presigned URL (без Authorization)
         await fetch(uploadUrl, {
           method:  'PUT',
-          headers: {
-            'Authorization': `Bearer ${r2Token}`,
-            'Content-Type':  file.type || 'audio/mpeg',
-          },
+          headers: { 'Content-Type': file.type || 'audio/mpeg' },
           body: file,
         })
 
