@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
   try {
-    const { title, artist, fileUrl, fileName, duration } = req.body;
+    const { title, artist, fileUrl, fileName, duration, artworkUrl } = req.body;
     if (!title || !fileUrl) return res.status(400).json({ error: 'title and fileUrl required' });
 
     const SB_URL = process.env.SUPABASE_URL;
@@ -27,11 +27,12 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         title,
-        artist:    artist || 'Unknown',
-        file_url:  fileUrl,
-        file_name: fileName,
-        duration:  duration || 0,
-        source:    'upload',
+        artist:     artist || 'Unknown',
+        file_url:   fileUrl,
+        file_name:  fileName,
+        duration:   duration || 0,
+        artwork_url: artworkUrl || null,
+        source:     'upload',
       }),
     });
 
