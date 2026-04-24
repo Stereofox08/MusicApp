@@ -30,11 +30,10 @@ export default function Player({ player }) {
 
       <div className="player-controls">
         <button
-          className="ctrl-btn"
-          onClick={toggleShuffle}
-          title="Shuffle"
-          style={{ color: shuffle ? 'var(--accent)' : undefined }}
-        >🔀</button>
+        className={`ctrl-btn ${shuffle ? 'ctrl-btn--active' : ''}`}
+        onClick={toggleShuffle}
+        title="Shuffle"
+      >🔀</button>    
         <button className="ctrl-btn" onClick={prev}>⏮</button>
         <button className="ctrl-btn play-btn" onClick={togglePlay} disabled={loading}>
           {loading ? '⏳' : playing ? '⏸' : '▶'}
