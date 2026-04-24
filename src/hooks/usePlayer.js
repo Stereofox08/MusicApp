@@ -2,19 +2,57 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { api } from '../api'
 
 export function usePlayer() {
-  const audioRef              = useRef(new Audio())
-  const [queue, setQueue]     = useState([])
-  const [index, setIndex]     = useState(-1)
-  const [playing, setPlaying] = useState(false)
-  const [progress, setProgress] = useState(0)   // 0..1
+  const audioRef                = useRef(new Audio())
+  const queueRef                = useRef([])
+  const indexRef                = useRef(-1)
+  const [queue, setQueue]       = useState([])
+  const [index, setIndex]       = useState(-1)
+  const [playing, setPlaying]   = useState(false)
+  const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
   const [volume, setVolume]     = useState(1)
   const [loading, setLoading]   = useState(false)
+  const [shuffle, setShuffle]   = useState(false)
 
   const current = queue[index] ?? null
 
-  // Синхронизируем volume
   useEffect(() => { audioRef.current.volume = volume }, [volume])
+
+  // Синхронизируем рефы с состоянием для колбэков
+  useEffect(() => { queueRef.current = queue }, [queue])
+  useEffect(() => { indexRef.current = index }, [index])
+
+  const playAtIndex = useCallback((ni) => {
+    const track = queueRef.current[ni]
+    if (!track) return
+    const url = api.streamUrl(track)
+    if (!url) return
+    const a = audioRef.current
+    a.src = url
+    a.load()
+    a.play().catch(() => {})
+    setIndex(ni)
+    indexRef.current = ni
+  }, [])
+
+  const next = useCallback(() => {
+    const q = queueRef.current
+    if (!q.length) return
+    let ni
+    if (shuffle) {
+      ni = Math.floor(Math.random() * q.length)
+    } else {
+      ni = indexRef.current + 1 < q.length ? indexRef.current + 1 : 0
+    }
+    playAtIndex(ni)
+  }, [shuffle, playAtIndex])
+
+  const prev = useCallback(() => {
+    const q = queueRef.current
+    if (!q.length) return
+    const pi = indexRef.current - 1 >= 0 ? indexRef.current - 1 : q.length - 1
+    playAtIndex(pi)
+  }, [playAtIndex])
 
   // События аудио
   useEffect(() => {
@@ -27,13 +65,13 @@ export function usePlayer() {
     const onWaiting  = () => setLoading(true)
     const onCanPlay  = () => setLoading(false)
 
-    a.addEventListener('timeupdate',  onTime)
+    a.addEventListener('timeupdate',     onTime)
     a.addEventListener('durationchange', onDuration)
-    a.addEventListener('play',        onPlay)
-    a.addEventListener('pause',       onPause)
-    a.addEventListener('ended',       onEnded)
-    a.addEventListener('waiting',     onWaiting)
-    a.addEventListener('canplay',     onCanPlay)
+    a.addEventListener('play',           onPlay)
+    a.addEventListener('pause',          onPause)
+    a.addEventListener('ended',          onEnded)
+    a.addEventListener('waiting',        onWaiting)
+    a.addEventListener('canplay',        onCanPlay)
     return () => {
       a.removeEventListener('timeupdate',     onTime)
       a.removeEventListener('durationchange', onDuration)
@@ -43,14 +81,17 @@ export function usePlayer() {
       a.removeEventListener('waiting',        onWaiting)
       a.removeEventListener('canplay',        onCanPlay)
     }
-  }, []) // eslint-disable-line
+  }, [next])
 
   const playTrack = useCallback(async (track, newQueue = null) => {
     const a = audioRef.current
     if (newQueue) {
       setQueue(newQueue)
+      queueRef.current = newQueue
       const i = newQueue.findIndex(t => t.id === track.id)
-      setIndex(i >= 0 ? i : 0)
+      const ni = i >= 0 ? i : 0
+      setIndex(ni)
+      indexRef.current = ni
     }
     setLoading(true)
     const url = api.streamUrl(track)
@@ -72,30 +113,10 @@ export function usePlayer() {
     if (a.duration) a.currentTime = ratio * a.duration
   }, [])
 
-  const next = useCallback(() => {
-    setIndex(i => {
-      const ni = i + 1 < queue.length ? i + 1 : 0
-      const track = queue[ni]
-      if (track) {
-        const url = api.streamUrl(track)
-        if (url) { audioRef.current.src = url; audioRef.current.play().catch(() => {}) }
-      }
-      return ni
-    })
-  }, [queue])
+  const toggleShuffle = useCallback(() => setShuffle(s => !s), [])
 
-  const prev = useCallback(() => {
-    setIndex(i => {
-      const pi = i - 1 >= 0 ? i - 1 : queue.length - 1
-      const track = queue[pi]
-      if (track) {
-        const url = api.streamUrl(track)
-        if (url) { audioRef.current.src = url; audioRef.current.play().catch(() => {}) }
-      }
-      return pi
-    })
-  }, [queue])
-
-  return { current, queue, playing, progress, duration, volume, loading,
-           playTrack, togglePlay, seek, next, prev, setVolume, setQueue, setIndex }
+  return {
+    current, queue, playing, progress, duration, volume, loading, shuffle,
+    playTrack, togglePlay, seek, next, prev, setVolume, toggleShuffle
+  }
 }
