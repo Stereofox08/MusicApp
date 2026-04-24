@@ -22,6 +22,12 @@ export default function SearchTab({ player, library }) {
     setLoading(false)
   }, [query])
 
+  const handleShuffle = () => {
+    if (results.length === 0) return
+    const shuffled = [...results].sort(() => Math.random() - 0.5)
+    player.playTrack(shuffled[0], shuffled)
+  }
+
   const savedIds = new Set(library.tracks.map(t => t.sc_id).filter(Boolean))
 
   return (
@@ -37,6 +43,11 @@ export default function SearchTab({ player, library }) {
         <button className="search-btn" type="submit" disabled={loading}>
           {loading ? '...' : '🔍'}
         </button>
+        {results.length > 0 && (
+          <button className="search-btn" type="button" onClick={handleShuffle} title="Shuffle">
+            🔀
+          </button>
+        )}
       </form>
 
       {error && <div className="error">{error}</div>}
