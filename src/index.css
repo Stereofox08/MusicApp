@@ -370,6 +370,6 @@ body {
   .player-time   { display: none; }
 }
 .ctrl-btn--active {
-  background: var(--accent) !important;
+  background: white;
   color: #fff !important;
 }
