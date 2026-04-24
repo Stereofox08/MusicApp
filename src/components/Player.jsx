@@ -8,14 +8,13 @@ function fmt(sec) {
 }
 
 export default function Player({ player }) {
-  const { current, playing, progress, duration, volume, loading,
-          togglePlay, seek, next, prev, setVolume } = player
+  const { current, playing, progress, duration, volume, loading, shuffle,
+          togglePlay, seek, next, prev, setVolume, toggleShuffle } = player
 
   if (!current) return null
 
   return (
     <div className="player">
-      {/* Обложка + инфо */}
       <div className="player-info">
         <img
           className="player-art"
@@ -29,8 +28,13 @@ export default function Player({ player }) {
         </div>
       </div>
 
-      {/* Контролы */}
       <div className="player-controls">
+        <button
+          className="ctrl-btn"
+          onClick={toggleShuffle}
+          title="Shuffle"
+          style={{ color: shuffle ? 'var(--accent)' : undefined }}
+        >🔀</button>
         <button className="ctrl-btn" onClick={prev}>⏮</button>
         <button className="ctrl-btn play-btn" onClick={togglePlay} disabled={loading}>
           {loading ? '⏳' : playing ? '⏸' : '▶'}
@@ -38,7 +42,6 @@ export default function Player({ player }) {
         <button className="ctrl-btn" onClick={next}>⏭</button>
       </div>
 
-      {/* Прогресс */}
       <div className="player-progress">
         <span className="player-time">{fmt(progress * duration)}</span>
         <div
@@ -53,7 +56,6 @@ export default function Player({ player }) {
         <span className="player-time">{fmt(duration)}</span>
       </div>
 
-      {/* Громкость */}
       <div className="player-volume">
         <span>🔊</span>
         <input
